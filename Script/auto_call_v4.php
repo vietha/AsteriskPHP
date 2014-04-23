@@ -1,0 +1,284 @@
+<?php
+//global variable
+require_once 'PAMI/Autoloader/Autoloader.php'; // Include PAMI autoloader.
+\PAMI\Autoloader\Autoloader::register(); // Call autoloader register for PAMI autoloader.
+use PAMI\Client\Impl\ClientImpl;
+set_include_path(get_include_path() . PATH_SEPARATOR . "/usr/share/php/log4php");
+
+//main
+
+use PAMI\Client\Impl\ClientImpl as PamiClient;
+use PAMI\Message\Event\EventMessage;
+use PAMI\Listener\IEventListener;
+use PAMI\Message\Event\HangupEvent;
+use PAMI\Message\Event\DialEvent;
+use PAMI\Message\Event\VarSetEvent;
+use PAMI\Message\Action\OriginateAction;
+use PAMI\Message\Event\OriginateResponseEvent;
+use PAMI\Message\Action\HangupAction;
+//init varibal
+$host = "127.0.0.1";//host mysql server
+$user = "root";//user mysql
+$pass = "12345678@X"; //pass mysql
+$database = "asdb"; //database mysql
+$table = "leads";  //table mysql
+//end init variable
+$phone = array();
+$number = "";
+$state = "1";
+$callid1="";
+$callid2="";
+
+$phone = Connect_database($GLOBALS['host'],$GLOBALS['user'],$GLOBALS['pass'],$GLOBALS['database'],$table);
+$ASTERISK = array(
+array(
+	'host' => '192.168.11.150',
+	'scheme' => 'tcp://',
+    	'port' => 5038,
+    	'username' => 'admin',
+    	'secret' => '123456',
+    	'connect_timeout' => 30000,
+    	'read_timeout' => 30000
+	),
+array(
+        'host' => '192.168.11.200',
+        'scheme' => 'tcp://',
+        'port' => 5038,
+        'username' => 'admin',
+        'secret' => '123456',        
+	'connect_timeout' => 30000,
+        'read_timeout' => 30000,
+        ),
+array(
+        'host' => '192.168.11.100',
+        'scheme' => 'tcp://',
+        'port' => 5038,
+        'username' => 'admin',
+        'secret' => '123456',
+        'connect_timeout' => 30000,
+        'read_timeout' => 30000,
+        )
+);
+$asterisk1 = $ASTERISK[0];
+$asterisk2 = $ASTERISK[1];
+$asterisk3 = $ASTERISK[2];
+$number = $phone[0];
+/*$pid = pcntl_fork();
+if($pid == -1)
+{
+	die('could not fork');
+}
+else
+{
+	if($pid)
+	{
+		//parent
+		$state =1;
+		Remote_Asterisk($asterisk1,$number,$state);
+		pcntl_wait($status);
+	
+	
+		pcntl_wait($status);
+	}
+	else
+	{
+		$state = 2;
+		Remote_Asterisk($asterisk2,$number,$state);
+		sleep(0);
+		$state = 3;
+		Remote_Asterisk($asterisk3,$number,$state);
+		
+	}
+}*/
+for($state =1 ;$state <=3; ++$state)
+{
+	$pid = pcntl_fork();
+	if(!$pid)
+	{
+		if($state==3)
+			sleep(5);
+		else
+			sleep(1);
+		Remote_Asterisk ($ASTERISK[$state-1],$number,$state);
+	}
+}
+//Remote_Asterisk ($asterisk1,$number,$state);
+//$state=2;
+//Remote_Asterisk ($asterisk2,$number,$state);
+//$state=3;
+//Remote_Asterisk($asterisk3,$number,$state);
+
+function Remote_Asterisk($asterisk,$number,$state)
+{
+	if($state!=3)
+		sleep(2);
+	$channel = 'SIP/'.$number.'@192.168.11.149'; 
+	$context = 'amitest';
+	$priority = '1';
+	$callerid = $asterisk['host'];
+	$exten = '6060';
+	$pamiClientOptions = $asterisk;
+	$pamiClient = new PamiClient($pamiClientOptions);
+	//open connect to AMI
+	$pamiClient->open();
+	//init call	
+	$originateMsg = new OriginateAction($channel);
+	$originateMsg->setContext($context);
+	$originateMsg->setExtension($exten);
+	$originateMsg->setCallerId($callerid);
+	$originateMsg->setAsync('yes');
+	$response = $pamiClient->send($originateMsg);
+	//write down phone to temple table, then agi scrit will get that phone
+	 Write_Phone($GLOBALS['host'],$GLOBALS['user'],$GLOBALS['pass'],$GLOBALS['database'],'phone',$GLOBALS['state'],$GLOBALS['number']);
+	
+		$pamiClient->registerEventListener(
+			function (OriginateResponseEvent $event)
+			{
+				
+						
+				switch($GLOBALS['state'])
+                                 {//get channel call1 and call2
+                                       case 1:
+					
+                                               $GLOBALS['callid1']=$event->getChannel();
+                                               	break;
+                                        case 2:
+                                                $GLOBALS['callid2']=$event->getChannel();
+                                                break;
+	                         }
+			
+			},
+			function (EventMessage $event)
+			{
+				if($event instanceof  OriginateResponseEvent)
+				{
+					return true;
+				}
+			}
+			
+		);
+	
+//	$response = $pamiClient->send($originateMsg);
+
+	//close connect 
+	$running=true;
+	while($running)
+	{
+		
+		$pamiClient->process();
+		
+		
+		switch($GLOBALS['state'])
+		{
+			case 1:
+				if(!empty($GLOBALS['callid1']))
+					$running = false;
+				break;	
+			case 2:
+				if(!empty($GLOBALS['callid2']))
+					$running = false;
+				break;
+			case 3://terminal call1 and call2
+				 TerminalCall($GLOBALS['asterisk1'],$GLOBALS['callid1']);
+				TerminalCall($GLOBALS['asterisk2'],$GLOBALS['callid2']);	
+				$running = false;
+				break;
+					
+		}
+
+	}
+	$pamiClient->close();
+}
+function TerminalCall ($asterisk,$channel)
+{
+	$PamiOption = $asterisk;
+	$PamiClient = new PamiClient ($PamiOption);
+	$PamiClient->open();
+	$PamiClient->send(new HangupAction($channel));
+	$PamiClient->close();	
+}
+function Write_Database($host,$user,$pass,$database,$table,$state,$status,$number,$active)
+{
+	
+         $sql= "update $table set `state`=$state, `status`='$status', `is_active`='$active', `last_call`=NOW() where `phonenumber`=$number" ;
+	
+
+        echo $sql;
+
+        $link = mysql_connect($host,$user,$pass,$database);
+        if(!$link){
+                die('could not connect:' .mysql_error());
+        }
+        mysql_select_db($database,$link);
+        $retval = mysql_query( $sql, $link );
+        if(! $retval )
+        {
+                die('Could not update data: ' . mysql_error());
+        }
+        echo "Updated data successfully\n";
+
+        mysql_close($link);
+}
+function Write_Phone($host,$user,$pass,$database,$table,$state,$number)
+{
+	
+	   $sql= "update $table set `State`=$state,`Number`=$number where `State`=$state" ;
+
+
+        echo $sql;
+
+        $link = mysql_connect($host,$user,$pass,$database);
+        if(!$link){
+                die('could not connect:' .mysql_error());
+        }
+        mysql_select_db($database,$link);
+        $retval = mysql_query( $sql, $link );
+        if(! $retval )
+        {
+                die('Could not update data: ' . mysql_error());
+        }
+        echo "Updated data successfully\n";
+
+        mysql_close($link);
+
+}
+
+
+
+
+
+
+
+	
+function Connect_Database($host,$user,$pass,$database,$table)
+
+{
+	$link = mysql_connect($host,$user,$pass,$database);
+	if(!$link){
+        	die('could not connect:' .mysql_error());
+	}
+	mysql_select_db($database,$link);
+	$sql = 'SELECT * FROM '.$table;
+	$result = mysql_query($sql,$link) or die(mysql_error());
+	$content = array();
+	$i =0;
+	while($row = mysql_fetch_assoc($result))
+	{
+		if($row['phonenumber']==5000)
+		//if($row['Active']=='NO')
+		
+		{
+			echo $row['phonenumber'];
+			$content[$i] = $row['phonenumber']; 
+			$i++;
+			
+		}
+	}
+	
+	mysql_close();
+	return $content;
+	
+}
+
+
+?>
